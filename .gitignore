@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+target/
+*.wasm
+
+# Secrets — never commit real env files (only .env.example is tracked)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Editor / OS
+.DS_Store
+.vercel
+.idea/

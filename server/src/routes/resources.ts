@@ -1,0 +1,192 @@
+import { Router, type Router as RouterType } from "express";
+import multer from "multer";
+import { z } from "zod/v4";
+import { apiKeyAuth } from "../middleware/apiKeyAuth.js";
+import { dynamicPaywall } from "../middleware/dynamicPaywall.js";
+import {
+  createFileResource,
+  createLinkResource,
+  listCatalog,
+  getResourceMeta,
+  getVerificationDetails,
+  delistResource,
+} from "../services/resourceService.js";
+import { downloadFile } from "../storage/supabaseStorage.js";
+import { db } from "../db/client.js";
+import { payments } from "../db/schema.js";
+import { config } from "../config.js";
+
+const router: RouterType = Router();
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.MAX_FILE_SIZE_MB * 1024 * 1024 },
+});
+
+const linkSchema = z.object({
+  title: z.string().min(1),
+  description: z.string().optional(),
+  price: z.string().min(1),
+  walletAddress: z.string().optional(),
+  externalUrl: z.url(),
+});
+
+// POST /resources — publish a resource (authenticated)
+router.post("/resources", apiKeyAuth, upload.single("file"), async (req, res) => {
+  const publisher = req.publisher!;
+
+  // File upload
+  if (req.file) {
+    const { title, description, price, walletAddress } = req.body;
+
+    if (!title || !price) {
+      res.status(400).json({ error: "title and price are required" });
+      return;
+    }
+
+    const resource = await createFileResource({
+      publisherId: publisher.id,
+      title,
+      description,
+      price,
+      walletAddress: walletAddress || publisher.walletAddress,
+      fileBuffer: req.file.buffer,
+      filename: req.file.originalname,
+      mimeType: req.file.mimetype,
+    });
+
+    res.status(201).json({
+      ...resource,
+      accessUrl: `${config.BASE_URL}/resources/${resource.id}`,
+    });
+    return;
+  }
+
+  // Link resource
+  const parsed = linkSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.format() });
+    return;
+  }
+
+  const resource = await createLinkResource({
+    publisherId: publisher.id,
+    title: parsed.data.title,
+    description: parsed.data.description,
+    price: parsed.data.price,
+    walletAddress: parsed.data.walletAddress || publisher.walletAddress,
+    externalUrl: parsed.data.externalUrl,
+  });
+
+  res.status(201).json({
+    ...resource,
+    accessUrl: `${config.BASE_URL}/resources/${resource.id}`,
+  });
+});
+
+// GET /resources — browse catalog (public)
+router.get("/resources", async (_req, res) => {
+  const catalog = await listCatalog();
+  res.json(
+    catalog.map((r) => ({
+      ...r,
+      accessUrl: `${config.BASE_URL}/resources/${r.id}`,
+    }))
+  );
+});
+
+// GET /resources/:id/meta — resource preview (public)
+router.get("/resources/:id/meta", async (req, res) => {
+  const meta = await getResourceMeta(req.params.id as string);
+  if (!meta) {
+    res.status(404).json({ error: "Resource not found" });
+    return;
+  }
+  res.json({
+    ...meta,
+    accessUrl: `${config.BASE_URL}/resources/${meta.id}`,
+  });
+});
+
+// GET /resources/:id/verification — verification status and details (public)
+router.get("/resources/:id/verification", async (req, res) => {
+  const details = await getVerificationDetails(req.params.id as string);
+  if (!details) {
+    res.status(404).json({ error: "Resource not found" });
+    return;
+  }
+  res.json(details);
+});
+
+// GET /resources/:id — access resource (x402 paywalled)
+router.get("/resources/:id", dynamicPaywall, async (req, res) => {
+  const resource = (req as any).resource;
+
+  // Record payment
+  let payerAddress = "unknown";
+  try {
+    const paymentHeader = req.headers["x-payment"] as string;
+    if (paymentHeader) {
+      const decoded = JSON.parse(
+        Buffer.from(paymentHeader, "base64").toString()
+      );
+      payerAddress = decoded?.payload?.authorization?.address || decoded?.clientAddress || "unknown";
+    }
+  } catch {
+    // Best effort — don't fail delivery if we can't parse
+  }
+
+  const [payment] = await db
+    .insert(payments)
+    .values({
+      resourceId: resource.id,
+      payerAddress,
+      recipientAddress: resource.walletAddress,
+      amount: resource.price,
+    })
+    .returning();
+
+  if (resource.resourceType === "link") {
+    res.json({
+      url: resource.externalUrl,
+      receipt: {
+        paymentId: payment.id,
+        amount: payment.amount,
+        currency: "USDC",
+        paidTo: payment.recipientAddress,
+        paidAt: payment.paidAt,
+      },
+    });
+    return;
+  }
+
+  // Stream file from Supabase Storage
+  if (!resource.storagePath) {
+    res.status(500).json({ error: "Resource file not found" });
+    return;
+  }
+
+  // Add receipt info in headers for file downloads
+  res.setHeader("X-Payment-Id", payment.id);
+  res.setHeader("X-Payment-Amount", `${payment.amount} USDC`);
+  res.setHeader("X-Payment-Recipient", payment.recipientAddress);
+
+  const { buffer, mimeType } = await downloadFile(resource.storagePath);
+  res.setHeader("Content-Type", mimeType);
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${resource.storagePath.split("/").pop()}"`
+  );
+  res.send(buffer);
+});
+
+// DELETE /resources/:id — delist a resource (authenticated, owner only)
+router.delete("/resources/:id", apiKeyAuth, async (req, res) => {
+  const resource = await delistResource(req.params.id as string, req.publisher!.id);
+  if (!resource) {
+    res.status(404).json({ error: "Resource not found or not owned by you" });
+    return;
+  }
+  res.json({ message: "Resource delisted", id: resource.id });
+});
+
+export default router;
