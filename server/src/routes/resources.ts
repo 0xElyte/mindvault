@@ -18,9 +18,9 @@ import { payments, resources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { config } from "../config.js";
 import {
-  registryClient,
   NETWORK_PASSPHRASE,
-  registryKeypair,
+  setPrice,
+  transferOwnership,
 } from "../services/registryClient.js";
 
 const router: RouterType = Router();
@@ -196,6 +196,63 @@ router.delete("/resources/:id", apiKeyAuth, async (req, res) => {
   res.json({ message: "Resource delisted", id: resource.id });
 });
 
+// POST /resources/:id/register — register a verified resource on-chain (owner only)
+router.post("/resources/:id/register", apiKeyAuth, async (req, res) => {
+  const publisher = req.publisher!;
+  const resourceId = req.params.id as string;
+
+  const resource = await getResourceById(resourceId);
+  if (!resource) {
+    res.status(404).json({ error: "Resource not found" });
+    return;
+  }
+  if (resource.publisherId !== publisher.id) {
+    res.status(403).json({ error: "Forbidden: you do not own this resource" });
+    return;
+  }
+  if (resource.verificationStatus !== "verified") {
+    res.status(400).json({ error: "Resource must be verified before registering on-chain" });
+    return;
+  }
+  if (resource.onchainStatus === "registered") {
+    res.status(409).json({ error: "Resource is already registered on-chain" });
+    return;
+  }
+
+  await db.update(resources).set({ onchainStatus: "pending" }).where(eq(resources.id, resourceId));
+
+  try {
+    const priceStroops = BigInt(Math.round(parseFloat(resource.price) * 1_000_000_0));
+    const tx = await (registryClient as any).register(
+      {
+        creator: resource.walletAddress,
+        id: resourceId,
+        price: priceStroops,
+        metadata: JSON.stringify({ title: resource.title, description: resource.description ?? "" }),
+      },
+      { simulate: false }
+    );
+
+    await tx.signAndSend({ signTransaction: async (xdr: string) => {
+      const { Transaction, Networks } = await import("@stellar/stellar-sdk");
+      const stellarTx = new Transaction(xdr, NETWORK_PASSPHRASE);
+      stellarTx.sign(registryKeypair);
+      return stellarTx.toXDR();
+    }});
+
+    const [updated] = await db
+      .update(resources)
+      .set({ onchainStatus: "registered" })
+      .where(eq(resources.id, resourceId))
+      .returning();
+
+    res.json({ id: updated.id, onchainStatus: updated.onchainStatus });
+  } catch (err: any) {
+    await db.update(resources).set({ onchainStatus: "failed" }).where(eq(resources.id, resourceId));
+    res.status(502).json({ error: "On-chain registration failed", detail: err?.message });
+  }
+});
+
 // POST /resources/:id/price/prepare — build unsigned set_price tx (owner only)
 // Returns the XDR of an unsigned transaction the owner must sign client-side.
 router.post("/resources/:id/price/prepare", apiKeyAuth, async (req, res) => {
@@ -218,15 +275,7 @@ router.post("/resources/:id/price/prepare", apiKeyAuth, async (req, res) => {
     return;
   }
 
-  // Convert USDC string (e.g. "0.50") to stroops (i128, 7 decimals)
-  const priceStroops = BigInt(Math.round(parseFloat(parsed.data.price) * 1_000_000_0));
-
-  const tx = await (registryClient as any).set_price(
-    { id: resourceId, new_price: priceStroops },
-    { simulate: false }
-  );
-
-  const unsignedXdr = tx.toXDR();
+  const unsignedXdr = await setPrice(resourceId, parsed.data.price);
   res.json({ unsignedXdr, networkPassphrase: NETWORK_PASSPHRASE });
 });
 
@@ -315,22 +364,18 @@ router.post("/resources/:id/ownership/prepare", apiKeyAuth, async (req, res) => 
   }
 
   const parsed = z
-    .object({ newOwnerWallet: z.string().min(1) })
+    .object({ newCreator: z.string().min(1) })
     .safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.format() });
     return;
   }
 
-  const tx = await (registryClient as any).transfer_ownership(
-    { id: resourceId, new_creator: parsed.data.newOwnerWallet },
-    { simulate: false }
-  );
-
-  res.json({ unsignedXdr: tx.toXDR(), networkPassphrase: NETWORK_PASSPHRASE });
+  const unsignedXdr = await transferOwnership(resourceId, parsed.data.newCreator);
+  res.json({ unsignedXdr, networkPassphrase: NETWORK_PASSPHRASE });
 });
 
-// POST /resources/:id/ownership — submit signed transfer_ownership tx and update DB
+// POST /resources/:id/ownership — submit signed transfer_ownership tx and sync DB
 router.post("/resources/:id/ownership", apiKeyAuth, async (req, res) => {
   const publisher = req.publisher!;
   const resourceId = req.params.id as string;
@@ -346,11 +391,7 @@ router.post("/resources/:id/ownership", apiKeyAuth, async (req, res) => {
   }
 
   const parsed = z
-    .object({
-      signedXdr: z.string().min(1),
-      newOwnerWallet: z.string().min(1),
-      newPublisherId: z.string().min(1),
-    })
+    .object({ signedXdr: z.string().min(1), newCreator: z.string().min(1) })
     .safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.format() });
@@ -361,10 +402,7 @@ router.post("/resources/:id/ownership", apiKeyAuth, async (req, res) => {
     "@stellar/stellar-sdk"
   );
   const rpcServer = new StellarRpc.Server(config.SOROBAN_RPC_URL);
-  const signedTx = new StellarTransaction(
-    parsed.data.signedXdr,
-    NETWORK_PASSPHRASE
-  );
+  const signedTx = new StellarTransaction(parsed.data.signedXdr, NETWORK_PASSPHRASE);
   const sendResult = await rpcServer.sendTransaction(signedTx);
 
   if (sendResult.status !== "PENDING") {
@@ -393,21 +431,11 @@ router.post("/resources/:id/ownership", apiKeyAuth, async (req, res) => {
 
   const [updated] = await db
     .update(resources)
-    .set({
-      publisherId: parsed.data.newPublisherId,
-      walletAddress: parsed.data.newOwnerWallet,
-      onchainTxHash: txHash,
-    })
+    .set({ walletAddress: parsed.data.newCreator })
     .where(eq(resources.id, resourceId))
     .returning();
 
-  res.json({
-    id: updated.id,
-    publisherId: updated.publisherId,
-    walletAddress: updated.walletAddress,
-    onchainTxHash: updated.onchainTxHash,
-    status: "confirmed",
-  });
+  res.json({ id: updated.id, newCreator: updated.walletAddress, status: "confirmed" });
 });
 
 export default router;
