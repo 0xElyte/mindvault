@@ -1,8 +1,8 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
-import pino, { type Logger } from 'pino';
+import { AsyncLocalStorage } from "node:async_hooks";
+import pino, { type Logger } from "pino";
 
 export const rootLogger: Logger = pino({
-  level: process.env.LOG_LEVEL ?? 'info',
+  level: process.env.LOG_LEVEL ?? "info",
 });
 
 type RequestContext = {

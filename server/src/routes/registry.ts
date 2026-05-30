@@ -12,9 +12,7 @@ router.get("/registry/status", async (_req, res) => {
     const tx = await registryClient.count();
     const resourceCount = Number(tx.result);
 
-    const network = config.NETWORK.includes(":")
-      ? config.NETWORK.split(":")[1]!
-      : config.NETWORK;
+    const network = config.NETWORK.includes(":") ? config.NETWORK.split(":")[1]! : config.NETWORK;
 
     res.set("Cache-Control", "public, max-age=30");
     res.json({

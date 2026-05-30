@@ -7,11 +7,7 @@ import type { RoutesConfig } from "@x402/core/server";
 import { getLogger } from "../lib/logger.js";
 import { network, sharedX402ResourceServer } from "../lib/x402.js";
 import { getResource } from "../services/registryClient.js";
-import {
-  getOnChainPrice,
-  normalizeUsdcPrice,
-  OnChainLookupError,
-} from "../lib/stellarRegistry.js";
+import { getOnChainPrice, normalizeUsdcPrice, OnChainLookupError } from "../lib/stellarRegistry.js";
 
 // Cache middleware instances by resource ID to avoid re-creating on every request
 const middlewareCache = new Map<
@@ -20,11 +16,7 @@ const middlewareCache = new Map<
 >();
 const CACHE_TTL_MS = 60_000; // 1 minute
 
-export async function dynamicPaywall(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
+export async function dynamicPaywall(req: Request, res: Response, next: NextFunction) {
   const resourceId = req.params.id as string;
 
   const resource = await db
@@ -65,7 +57,7 @@ export async function dynamicPaywall(
         error: message,
         cause,
       },
-      "on-chain price lookup failed"
+      "on-chain price lookup failed",
     );
     res.status(503).json({
       error: "chain_unavailable",
@@ -86,7 +78,7 @@ export async function dynamicPaywall(
         publisherWallet: resource.walletAddress,
         onChainCreator,
       },
-      "price mismatch between database and on-chain registry"
+      "price mismatch between database and on-chain registry",
     );
     res.status(409).json({
       error: "price_mismatch",
@@ -113,7 +105,7 @@ export async function dynamicPaywall(
     } catch (error) {
       getLogger().warn(
         { event: "paywall_onchain_price_fallback", resourceId, err: error },
-        "failed to fetch on-chain price; using database price"
+        "failed to fetch on-chain price; using database price",
       );
       // Fall back to database price
     }

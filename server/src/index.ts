@@ -12,6 +12,6 @@ app.listen(config.PORT, () => {
       network: config.NETWORK,
       healthUrl: `http://localhost:${config.PORT}/health`,
     },
-    "MindVault server started"
+    "MindVault server started",
   );
 });
