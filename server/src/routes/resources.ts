@@ -26,6 +26,7 @@ import { db } from "../db/client.js";
 import { payments, resources } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { config } from "../config.js";
+import { getLogger } from "../lib/logger.js";
 import {
   publishIpRateLimit,
   publishWalletRateLimit,
@@ -314,9 +315,18 @@ router.post(
       const result = await submitSignedTx(signedXdr);
 
       if (result.success) {
+        getLogger().info(
+          {
+            event: "onchain_register",
+            resourceId,
+            txHash: result.txHash,
+            success: true,
+          },
+          "on-chain resource registration succeeded"
+        );
         const [updated] = await db
           .update(resources)
-          .set({ onchainStatus: "registered" })
+          .set({ onchainStatus: "registered", onchainTxHash: result.txHash })
           .where(eq(resources.id, resourceId))
           .returning();
 
@@ -326,6 +336,16 @@ router.post(
           txHash: result.txHash,
         });
       } else {
+        getLogger().warn(
+          {
+            event: "onchain_register",
+            resourceId,
+            txHash: result.txHash || undefined,
+            success: false,
+            error: result.error,
+          },
+          "on-chain resource registration failed"
+        );
         await db.update(resources).set({ onchainStatus: "failed" }).where(eq(resources.id, resourceId));
         res.status(502).json({
           error: "On-chain registration failed",
@@ -346,24 +366,47 @@ router.post(
         { simulate: false }
       );
 
-      await tx.signAndSend({
+      const sentTx = await tx.signAndSend({
         signTransaction: async (xdr: string) => {
-          const { Transaction, Networks } = await import("@stellar/stellar-sdk");
+          const { Transaction } = await import("@stellar/stellar-sdk");
           const stellarTx = new Transaction(xdr, NETWORK_PASSPHRASE);
           stellarTx.sign(registryKeypair);
           return stellarTx.toXDR();
-        }
+        },
       });
+
+      const legacyTxHash = sentTx?.sendTransactionResponse?.hash ?? "";
+      getLogger().info(
+        {
+          event: "onchain_register",
+          resourceId,
+          txHash: legacyTxHash,
+          success: true,
+          flow: "legacy",
+        },
+        "on-chain resource registration succeeded"
+      );
 
       const [updated] = await db
         .update(resources)
-        .set({ onchainStatus: "registered" })
+        .set({
+          onchainStatus: "registered",
+          ...(legacyTxHash ? { onchainTxHash: legacyTxHash } : {}),
+        })
         .where(eq(resources.id, resourceId))
         .returning();
 
-      res.json({ id: updated.id, onchainStatus: updated.onchainStatus });
+      res.json({
+        id: updated.id,
+        onchainStatus: updated.onchainStatus,
+        ...(legacyTxHash ? { txHash: legacyTxHash } : {}),
+      });
     }
   } catch (err: any) {
+    getLogger().error(
+      { event: "onchain_register", resourceId, success: false, err },
+      "on-chain resource registration failed"
+    );
     // Mark failed but do NOT touch `listed` — resource stays available for purchase
     await db.update(resources).set({ onchainStatus: "failed" }).where(eq(resources.id, resourceId));
     res.status(502).json({

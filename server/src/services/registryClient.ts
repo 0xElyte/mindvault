@@ -1,6 +1,7 @@
 import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { Client, Errors, listResources, type Resource } from "@mindvault/registry-client";
 import { config } from "../config.js";
+import { getLogger } from "../lib/logger.js";
 
 const NETWORK_PASSPHRASE =
   config.NETWORK === "stellar:testnet"
@@ -118,9 +119,9 @@ export async function submitSignedTx(signedXdr: string): Promise<{
   error?: string;
 }> {
   try {
-    // Parse the signed transaction
-    const transaction = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-    
+    // Validate the signed transaction parses before submission
+    TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+
     // Submit to Soroban RPC
     const server = registryClient.options.rpcUrl;
     const response = await fetch(server, {
@@ -141,6 +142,15 @@ export async function submitSignedTx(signedXdr: string): Promise<{
     const result = await response.json();
     
     if (result.error) {
+      getLogger().warn(
+        {
+          event: "onchain_submit",
+          phase: "send",
+          success: false,
+          error: result.error.message || "Transaction submission failed",
+        },
+        "signed transaction submission failed"
+      );
       return {
         txHash: '',
         success: false,
@@ -149,6 +159,7 @@ export async function submitSignedTx(signedXdr: string): Promise<{
     }
 
     const txHash = result.result.hash;
+    getLogger().info({ event: "onchain_submit", phase: "sent", txHash }, "signed transaction submitted");
     
     // Poll for transaction result with timeout
     const maxAttempts = 30; // 30 seconds timeout
@@ -182,11 +193,19 @@ export async function submitSignedTx(signedXdr: string): Promise<{
       const status = statusResult.result.status;
       
       if (status === 'SUCCESS') {
+        getLogger().info(
+          { event: "onchain_submit", phase: "confirmed", txHash, success: true },
+          "signed transaction confirmed on-chain"
+        );
         return {
           txHash,
           success: true,
         };
       } else if (status === 'FAILED') {
+        getLogger().warn(
+          { event: "onchain_submit", phase: "confirmed", txHash, success: false },
+          "signed transaction failed on-chain"
+        );
         return {
           txHash,
           success: false,
@@ -197,6 +216,10 @@ export async function submitSignedTx(signedXdr: string): Promise<{
     }
     
     // Timeout reached
+    getLogger().warn(
+      { event: "onchain_submit", phase: "timeout", txHash, success: false },
+      "signed transaction confirmation timed out"
+    );
     return {
       txHash,
       success: false,
@@ -204,6 +227,7 @@ export async function submitSignedTx(signedXdr: string): Promise<{
     };
     
   } catch (error) {
+    getLogger().error({ event: "onchain_submit", phase: "error", err: error }, "signed transaction submit failed");
     return {
       txHash: '',
       success: false,

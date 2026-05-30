@@ -10,6 +10,10 @@ vi.mock("@x402/express", () => ({
 }));
 vi.mock("@x402/core/server", () => ({ HTTPFacilitatorClient: class { constructor() { } } }));
 vi.mock("@x402/stellar/exact/server", () => ({ ExactStellarScheme: class { constructor() { } } }));
+vi.mock("../lib/x402.js", () => ({
+    network: "stellar:testnet",
+    sharedX402ResourceServer: {},
+}));
 vi.mock("../config.ts", () => ({
     config: {
         NETWORK: "stellar:testnet",

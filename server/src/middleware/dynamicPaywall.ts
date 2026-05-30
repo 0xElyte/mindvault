@@ -1,33 +1,17 @@
 import type { Request, Response, NextFunction } from "express";
-import {
-  paymentMiddleware,
-  x402ResourceServer,
-} from "@x402/express";
-import { HTTPFacilitatorClient } from "@x402/core/server";
-import { ExactStellarScheme } from "@x402/stellar/exact/server";
+import { paymentMiddleware } from "@x402/express";
 import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { resources } from "../db/schema.js";
-import type { Network } from "@x402/core/types";
 import type { RoutesConfig } from "@x402/core/server";
-import { config } from "../config.js";
+import { getLogger } from "../lib/logger.js";
+import { network, sharedX402ResourceServer } from "../lib/x402.js";
 import { getResource } from "../services/registryClient.js";
 import {
   getOnChainPrice,
   normalizeUsdcPrice,
   OnChainLookupError,
 } from "../lib/stellarRegistry.js";
-
-const network = config.NETWORK as Network;
-
-const facilitatorClient = new HTTPFacilitatorClient({
-  url: config.FACILITATOR_URL,
-});
-
-const resourceServer = new x402ResourceServer(facilitatorClient).register(
-  network,
-  new ExactStellarScheme()
-);
 
 // Cache middleware instances by resource ID to avoid re-creating on every request
 const middlewareCache = new Map<
@@ -74,12 +58,15 @@ export async function dynamicPaywall(
       err instanceof OnChainLookupError && err.cause instanceof Error
         ? err.cause.message
         : undefined;
-    console.error("[paywall] on-chain price lookup failed", {
-      resourceId,
-      error: message,
-      cause,
-      timestamp: new Date().toISOString(),
-    });
+    getLogger().error(
+      {
+        event: "paywall_chain_lookup_failed",
+        resourceId,
+        error: message,
+        cause,
+      },
+      "on-chain price lookup failed"
+    );
     res.status(503).json({
       error: "chain_unavailable",
       message: "Unable to verify resource price. Please try again later.",
@@ -90,17 +77,16 @@ export async function dynamicPaywall(
 
   const dbPriceNormalized = normalizeUsdcPrice(resource.price);
   if (dbPriceNormalized !== onChainPrice) {
-    const timestamp = new Date().toISOString();
-    console.warn(
-      `Price mismatch detected for resource ${resourceId}: DB=$${resource.price} chain=$${onChainPrice}`,
+    getLogger().warn(
       {
+        event: "paywall_price_mismatch",
         resourceId,
         dbPrice: resource.price,
         chainPrice: onChainPrice,
         publisherWallet: resource.walletAddress,
         onChainCreator,
-        timestamp,
-      }
+      },
+      "price mismatch between database and on-chain registry"
     );
     res.status(409).json({
       error: "price_mismatch",
@@ -125,7 +111,10 @@ export async function dynamicPaywall(
         finalPrice = onchainPriceUsdc;
       }
     } catch (error) {
-      console.warn(`Failed to fetch on-chain price for ${resourceId}:`, error);
+      getLogger().warn(
+        { event: "paywall_onchain_price_fallback", resourceId, err: error },
+        "failed to fetch on-chain price; using database price"
+      );
       // Fall back to database price
     }
   }
@@ -151,7 +140,7 @@ export async function dynamicPaywall(
     },
   };
 
-  const mw = paymentMiddleware(routes, resourceServer);
+  const mw = paymentMiddleware(routes, sharedX402ResourceServer);
 
   // Cache it with the final price key
   middlewareCache.set(cacheKey, {

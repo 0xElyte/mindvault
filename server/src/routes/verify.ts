@@ -1,17 +1,12 @@
 import { Router, type Router as RouterType } from "express";
-import {
-  paymentMiddleware,
-  x402ResourceServer,
-} from "@x402/express";
-import { HTTPFacilitatorClient } from "@x402/core/server";
-import { ExactStellarScheme } from "@x402/stellar/exact/server";
-import type { Network } from "@x402/core/types";
+import { paymentMiddleware } from "@x402/express";
 import type { RoutesConfig } from "@x402/core/server";
 import { eq, desc, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { resources, verifications } from "../db/schema.js";
 import { checkOriginality } from "../services/verificationService.js";
 import { config } from "../config.js";
+import { network, sharedX402ResourceServer } from "../lib/x402.js";
 import {
   verifyIpRateLimit,
   verifyWalletRateLimit,
@@ -20,16 +15,6 @@ import { validate } from "../middleware/validate.js";
 import { verifyContentSchema } from "../schemas/requests.js";
 
 const router: RouterType = Router();
-const network = config.NETWORK as Network;
-
-const facilitatorClient = new HTTPFacilitatorClient({
-  url: config.FACILITATOR_URL,
-});
-
-const resourceServer = new x402ResourceServer(facilitatorClient).register(
-  network,
-  new ExactStellarScheme()
-);
 
 const verifyRoutes: RoutesConfig = {
   "POST /verify-content": {
@@ -43,7 +28,7 @@ const verifyRoutes: RoutesConfig = {
   },
 };
 
-const verifyPaywall = paymentMiddleware(verifyRoutes, resourceServer);
+const verifyPaywall = paymentMiddleware(verifyRoutes, sharedX402ResourceServer);
 
 // POST /verify-content — AI originality check (x402 paywalled)
 router.post(
