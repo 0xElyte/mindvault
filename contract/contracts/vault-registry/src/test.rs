@@ -42,6 +42,31 @@ fn register_then_read() {
 }
 
 #[test]
+fn count_tracks_multiple_successful_registrations() {
+    let (env, creator, client) = setup();
+    assert_eq!(client.count(), 0);
+
+    let ids = ["c1", "c2", "c3", "c4"];
+    for id in &ids {
+        client.register(
+            &creator,
+            &String::from_str(&env, id),
+            &100i128,
+            &String::from_str(&env, "m"),
+        );
+    }
+    assert_eq!(client.count(), 4);
+
+    // Failed duplicate must not increment count.
+    let dup = String::from_str(&env, "c2");
+    assert_eq!(
+        client.try_register(&creator, &dup, &100i128, &String::from_str(&env, "m")),
+        Err(Ok(Error::AlreadyRegistered))
+    );
+    assert_eq!(client.count(), 4);
+}
+
+#[test]
 fn duplicate_registration_fails() {
     let (env, creator, client) = setup();
     let id = String::from_str(&env, "dup");
