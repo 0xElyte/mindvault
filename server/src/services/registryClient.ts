@@ -1,94 +1,240 @@
-import { Keypair, TransactionBuilder, Networks, xdr, Contract, Address, rpc } from "@stellar/stellar-sdk";
+import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Client, Errors, listResources, type Resource } from "@mindvault/registry-client";
 import { config } from "../config.js";
-import { db } from "../db/client.js";
-import { resources } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { getLogger } from "../lib/logger.js";
 
-const RPC_URL = config.NETWORK.includes("testnet") 
-  ? "https://soroban-testnet.stellar.org" 
-  : "https://mainnet.stellar.org:443";
-const server = new rpc.Server(RPC_URL);
+const NETWORK_PASSPHRASE =
+  config.NETWORK === "stellar:testnet" ? Networks.TESTNET : Networks.PUBLIC;
 
-export async function registerResourceOnchain(resourceId: string) {
-  const [resource] = await db
-    .select()
-    .from(resources)
-    .where(eq(resources.id, resourceId));
+const keypair = Keypair.fromSecret(config.REGISTRY_SECRET_KEY);
 
-  if (!resource) {
-    throw new Error(`Resource ${resourceId} not found`);
+export const registryClient = new Client({
+  contractId: config.REGISTRY_CONTRACT_ID,
+  rpcUrl: config.SOROBAN_RPC_URL,
+  networkPassphrase: NETWORK_PASSPHRASE,
+  publicKey: keypair.publicKey(),
+});
+
+export { NETWORK_PASSPHRASE, keypair as registryKeypair };
+export type { Resource };
+
+/**
+ * Fetch a resource from the on-chain vault registry.
+ * Returns the parsed Resource (creator, price, metadata) or null if not found.
+ */
+export async function getResource(id: string): Promise<Resource | null> {
+  const tx = await registryClient.get({ id });
+  const result = tx.result;
+  if (result.isErr()) {
+    const err = result.unwrapErr();
+    if (err.message === Errors[2].message) return null; // NotFound
+    throw new Error(`Contract error: ${err.message}`);
   }
+  return result.unwrap();
+}
 
-  if (!config.REGISTRY_CONTRACT_ID) {
-    console.warn("REGISTRY_CONTRACT_ID not configured, skipping onchain registration");
-    return;
-  }
+/**
+ * Check whether a resource with the given id is registered on-chain.
+ */
+export async function resourceExists(id: string): Promise<boolean> {
+  const tx = await registryClient.exists({ id });
+  return tx.result;
+}
 
-  // Update status to pending if not already
-  await db
-    .update(resources)
-    .set({ onchainStatus: "pending" })
-    .where(eq(resources.id, resourceId));
+export async function getResourcePage(start: number, limit: number): Promise<Resource[]> {
+  return listResources(registryClient, start, limit);
+}
 
+/**
+ * Total number of resources ever registered on-chain.
+ */
+export async function resourceCount(): Promise<number> {
+  const tx = await registryClient.count();
+  return Number(tx.result);
+}
+
+/**
+ * Convert a USDC decimal string (e.g. "0.50") to i128 stroops.
+ * Stellar USDC uses 7 decimal places: 1 USDC = 10_000_000 stroops.
+ */
+export function usdcToStroops(usdc: string): bigint {
+  return BigInt(Math.round(parseFloat(usdc) * 10_000_000));
+}
+
+/**
+ * Build an unsigned set_price transaction for the resource owner to sign.
+ * Returns the transaction XDR string.
+ */
+export async function setPrice(id: string, newPriceUsdc: string): Promise<string> {
+  const tx = await (registryClient as any).set_price(
+    { id, new_price: usdcToStroops(newPriceUsdc) },
+    { simulate: false },
+  );
+  return tx.toXDR();
+}
+
+/**
+ * Build an unsigned transfer_ownership transaction for the resource owner to sign.
+ * Returns the transaction XDR string.
+ */
+export async function transferOwnership(id: string, newCreator: string): Promise<string> {
+  const tx = await (registryClient as any).transfer_ownership(
+    { id, new_creator: newCreator },
+    { simulate: false },
+  );
+  return tx.toXDR();
+}
+
+/**
+ * Build an unsigned register transaction for the resource creator to sign.
+ * Returns the transaction XDR string.
+ */
+export async function buildRegisterTx(
+  creator: string,
+  id: string,
+  priceUsdc: string,
+  metadata: string,
+): Promise<string> {
+  const tx = await (registryClient as any).register(
+    {
+      creator,
+      id,
+      price: usdcToStroops(priceUsdc),
+      metadata,
+    },
+    { simulate: false },
+  );
+  return tx.toXDR();
+}
+
+/**
+ * Submit a creator-signed XDR to Soroban RPC and poll for the result.
+ * Returns the transaction hash and success/failure status.
+ */
+export async function submitSignedTx(signedXdr: string): Promise<{
+  txHash: string;
+  success: boolean;
+  error?: string;
+}> {
   try {
-    const agentKeypair = Keypair.fromSecret(config.AGENT_SECRET_KEY);
-    const agentAddress = agentKeypair.publicKey();
-    
-    const account = await server.getAccount(agentAddress);
-    const contract = new Contract(config.REGISTRY_CONTRACT_ID);
+    // Validate the signed transaction parses before submission
+    TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
 
-    // Prepare the register call
-    // register(creator: Address, id: String, price: i128, metadata: String)
-    // We use the platform agent as the creator for now since we have their keys.
-    const tx = new TransactionBuilder(account, {
-      fee: "10000",
-      networkPassphrase: config.NETWORK.includes("testnet") 
-        ? Networks.TESTNET 
-        : Networks.PUBLIC,
-    })
-      .addOperation(
-        contract.call(
-          "register",
-          new Address(agentAddress).toScVal(),
-          xdr.ScVal.scvString(resource.id),
-          xdr.ScVal.scvI128(xdr.Int128Parts.fromBigInt(BigInt(Math.round(parseFloat(resource.price) * 1e7)))),
-          xdr.ScVal.scvString(`mindvault:resource:${resource.id}`)
-        )
-      )
-      .setTimeout(30)
-      .build();
+    // Submit to Soroban RPC
+    const server = registryClient.options.rpcUrl;
+    const response = await fetch(server, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "sendTransaction",
+        params: {
+          transaction: signedXdr,
+        },
+      }),
+    });
 
-    tx.sign(agentKeypair);
+    const result = await response.json();
 
-    const result = await server.sendTransaction(tx);
-    
-    if (result.status === "ERROR") {
-      throw new Error(`Transaction failed: ${JSON.stringify(result.errorResultXdr)}`);
+    if (result.error) {
+      getLogger().warn(
+        {
+          event: "onchain_submit",
+          phase: "send",
+          success: false,
+          error: result.error.message || "Transaction submission failed",
+        },
+        "signed transaction submission failed",
+      );
+      return {
+        txHash: "",
+        success: false,
+        error: result.error.message || "Transaction submission failed",
+      };
     }
 
-    // Wait for transaction to be mined
-    let txResponse = await server.getTransaction(result.hash);
-    while (txResponse.status === "NOT_FOUND" || txResponse.status === "PENDING") {
-      await new Promise(r => setTimeout(r, 1000));
-      txResponse = await server.getTransaction(result.hash);
+    const txHash = result.result.hash;
+    getLogger().info(
+      { event: "onchain_submit", phase: "sent", txHash },
+      "signed transaction submitted",
+    );
+
+    // Poll for transaction result with timeout
+    const maxAttempts = 30; // 30 seconds timeout
+    const pollInterval = 1000; // 1 second
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+
+      const statusResponse = await fetch(server, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getTransaction",
+          params: {
+            hash: txHash,
+          },
+        }),
+      });
+
+      const statusResult = await statusResponse.json();
+
+      if (statusResult.error) {
+        // Transaction not found yet, continue polling
+        continue;
+      }
+
+      const status = statusResult.result.status;
+
+      if (status === "SUCCESS") {
+        getLogger().info(
+          { event: "onchain_submit", phase: "confirmed", txHash, success: true },
+          "signed transaction confirmed on-chain",
+        );
+        return {
+          txHash,
+          success: true,
+        };
+      } else if (status === "FAILED") {
+        getLogger().warn(
+          { event: "onchain_submit", phase: "confirmed", txHash, success: false },
+          "signed transaction failed on-chain",
+        );
+        return {
+          txHash,
+          success: false,
+          error: "Transaction failed on-chain",
+        };
+      }
+      // If status is still PENDING, continue polling
     }
 
-    if (txResponse.status === "SUCCESS") {
-      await db
-        .update(resources)
-        .set({
-          onchainStatus: "registered",
-          onchainTxHash: result.hash,
-        })
-        .where(eq(resources.id, resourceId));
-    } else {
-      throw new Error(`Onchain registration failed: ${txResponse.status}`);
-    }
+    // Timeout reached
+    getLogger().warn(
+      { event: "onchain_submit", phase: "timeout", txHash, success: false },
+      "signed transaction confirmation timed out",
+    );
+    return {
+      txHash,
+      success: false,
+      error: "Transaction polling timeout - status unknown",
+    };
   } catch (error) {
-    console.error(`Failed to register resource ${resourceId} onchain:`, error);
-    await db
-      .update(resources)
-      .set({ onchainStatus: "failed" })
-      .where(eq(resources.id, resourceId));
+    getLogger().error(
+      { event: "onchain_submit", phase: "error", err: error },
+      "signed transaction submit failed",
+    );
+    return {
+      txHash: "",
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error occurred",
+    };
   }
 }

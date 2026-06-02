@@ -17,16 +17,22 @@ reads the canonical resource entry here.
 
 | Function | Auth | Description |
 |----------|------|-------------|
-| `register(creator, id, price, metadata)` | creator | Register a new resource. Errors if `id` exists or `price <= 0`. |
+| `register(creator, id, price, metadata)` | creator | Register a new resource. Errors if `id` exists or `price <= 0`. Resources are listed by default. |
 | `set_price(id, new_price)` | creator | Update the price. |
 | `update_metadata(id, metadata)` | creator | Update the metadata pointer (e.g. IPFS URI / content hash). |
 | `transfer_ownership(id, new_creator)` | creator | Hand the resource to a new owner. |
+| `set_listed(id, listed)` | creator | Set the listing state of a resource (true = listed, false = delisted). |
+| `delist(id)` | creator | Convenience method to delist a resource (equivalent to `set_listed(id, false)`). |
+| `list(start, limit) -> Vec<Resource>` | — | Paginated slice in insertion order. `start` is the 0-based index; `limit` capped at 20. |
 | `get(id) -> Resource` | — | Read a resource. Errors `NotFound` if absent. |
 | `exists(id) -> bool` | — | Whether a resource is registered. |
-| `count() -> u32` | — | Total resources ever registered. |
+| `count() -> u32` | — | Total resources successfully registered (view; used for registry stats). |
 
 `price` is an `i128` in USDC stroops (7 decimals — `1_000_000` = 0.10 USDC).
 `id` is the resource's cuid2 string, matching the server's resource IDs.
+`metadata` is a pointer string (IPFS URI, content hash, or compact JSON anchor), max
+512 bytes (`MetadataTooLong` if exceeded).
+`listed` is a boolean indicating whether the resource is available for discovery and purchase.
 
 ### Develop
 
@@ -49,6 +55,30 @@ stellar contract deploy \
 
 The command prints the deployed contract ID — wire it into the server config so
 the backend can record resources on registration.
+
+### Testnet Deployment
+
+The current canonical testnet deployment:
+
+| Field             | Value                                                          |
+|-------------------|----------------------------------------------------------------|
+| Contract ID       | `CDQKUIADLO5S5WEHEUTTXX2M45WAHVRU2PBEBD6ZGDKMOP5A72FJ3OD4`     |
+| Wasm Hash         | `fa60c0c2086fddf6add8abc7e1b191e1368ed62983f4e967069fc4b4d679c8eb` |
+| Deployer Address  | `GDAL5CGX7PU56PS2GJW65JNZSN7VLWI6R7H7E3G2HVS5R6XQQI2NJX34`     |
+| Network           | Stellar Testnet (`Test SDF Network ; September 2015`)          |
+| Soroban RPC       | `https://soroban-testnet.stellar.org`                          |
+| Deployment Date   | 2026-05-27                                                     |
+| Explorer          | [stellar.expert](https://stellar.expert/explorer/testnet/contract/CDQKUIADLO5S5WEHEUTTXX2M45WAHVRU2PBEBD6ZGDKMOP5A72FJ3OD4) |
+
+Set `VAULT_REGISTRY_CONTRACT_ID` and `SOROBAN_RPC_URL` in the server `.env`
+(see [`server/.env.example`](../server/.env.example)) so the backend can
+record/read resources on this contract.
+
+### Emergency pause
+
+See [contract-registry-pause-decision.md](../docs/contract-registry-pause-decision.md)
+for the architecture spike on admin pause/unpause. **v1 does not implement pause**
+(creator-scoped writes + off-chain ops are sufficient for the current trust model).
 
 ### Ideas for contributors
 

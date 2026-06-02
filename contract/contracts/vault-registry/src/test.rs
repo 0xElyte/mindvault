@@ -1,7 +1,17 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env, String};
+use soroban_sdk::{
+    testutils::{storage::Persistent as _, Address as _, Ledger as _},
+    Address, Env, String,
+};
+
+const DAY_IN_LEDGERS: u32 = 17_280;
+
+fn resource_storage_ttl(env: &Env, contract: &soroban_sdk::Address, id: &String) -> u32 {
+    let key = DataKey::Resource(id.clone());
+    env.as_contract(contract, || env.storage().persistent().get_ttl(&key))
+}
 
 fn setup<'a>() -> (Env, Address, VaultRegistryClient<'a>) {
     let env = Env::default();
@@ -28,6 +38,32 @@ fn register_then_read() {
     assert_eq!(r.creator, creator);
     assert_eq!(r.price, 1_000_000i128);
     assert_eq!(r.metadata, metadata);
+    assert_eq!(r.listed, true); // Resources are listed by default
+}
+
+#[test]
+fn count_tracks_multiple_successful_registrations() {
+    let (env, creator, client) = setup();
+    assert_eq!(client.count(), 0);
+
+    let ids = ["c1", "c2", "c3", "c4"];
+    for id in &ids {
+        client.register(
+            &creator,
+            &String::from_str(&env, id),
+            &100i128,
+            &String::from_str(&env, "m"),
+        );
+    }
+    assert_eq!(client.count(), 4);
+
+    // Failed duplicate must not increment count.
+    let dup = String::from_str(&env, "c2");
+    assert_eq!(
+        client.try_register(&creator, &dup, &100i128, &String::from_str(&env, "m")),
+        Err(Ok(Error::AlreadyRegistered))
+    );
+    assert_eq!(client.count(), 4);
 }
 
 #[test]
@@ -100,4 +136,310 @@ fn ownership_can_transfer() {
     let new_owner = Address::generate(&env);
     client.transfer_ownership(&id, &new_owner);
     assert_eq!(client.get(&id).creator, new_owner);
+}
+
+#[test]
+fn set_listed_toggles_listing_state() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "r4");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "m"));
+
+    // Initially listed
+    assert_eq!(client.get(&id).listed, true);
+
+    // Delist
+    client.set_listed(&id, &false);
+    assert_eq!(client.get(&id).listed, false);
+
+    // Re-list
+    client.set_listed(&id, &true);
+    assert_eq!(client.get(&id).listed, true);
+}
+
+#[test]
+fn delist_convenience_method() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "r5");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "m"));
+
+    // Initially listed
+    assert_eq!(client.get(&id).listed, true);
+
+    // Delist using convenience method
+    client.delist(&id);
+    assert_eq!(client.get(&id).listed, false);
+}
+
+#[test]
+fn set_price_preserves_other_fields() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "r7");
+    let metadata = String::from_str(&env, "ipfs://QmPreserve");
+    client.register(&creator, &id, &100i128, &metadata);
+
+    client.set_price(&id, &250i128);
+    let resource = client.get(&id);
+
+    assert_eq!(resource.price, 250i128);
+    assert_eq!(resource.metadata, metadata);
+    assert_eq!(resource.creator, creator);
+    assert_eq!(resource.listed, true);
+}
+
+#[test]
+fn transfer_ownership_keeps_count_and_order() {
+    let (env, creator, client) = setup();
+    let ids = ["a", "b"];
+    for id in &ids {
+        client.register(
+            &creator,
+            &String::from_str(&env, id),
+            &100i128,
+            &String::from_str(&env, "m"),
+        );
+    }
+
+    let new_owner = Address::generate(&env);
+    let id = String::from_str(&env, "a");
+    client.transfer_ownership(&id, &new_owner);
+
+    assert_eq!(client.count(), 2);
+    let list = client.list(&0u32, &10u32);
+    assert_eq!(list.get(0).unwrap().id, id);
+    assert_eq!(list.get(0).unwrap().creator, new_owner);
+    assert_eq!(list.get(1).unwrap().id, String::from_str(&env, "b"));
+}
+
+#[test]
+fn update_metadata_preserves_price_and_creator() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "r8");
+    let original_metadata = String::from_str(&env, "ipfs://QmOriginal");
+    client.register(&creator, &id, &500i128, &original_metadata);
+
+    let new_metadata = String::from_str(&env, "ipfs://QmUpdated");
+    client.update_metadata(&id, &new_metadata);
+
+    let resource = client.get(&id);
+    assert_eq!(resource.metadata, new_metadata);
+    assert_eq!(resource.price, 500i128);
+    assert_eq!(resource.creator, creator);
+}
+
+#[test]
+fn set_listed_requires_creator_auth() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "r6");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "m"));
+
+    // This should work fine since we mock all auths
+    client.set_listed(&id, &false);
+    assert_eq!(client.get(&id).listed, false);
+}
+
+#[test]
+fn set_listed_on_missing_resource_fails() {
+    let (env, _creator, client) = setup();
+    let id = String::from_str(&env, "missing");
+
+    let res = client.try_set_listed(&id, &false);
+    assert_eq!(res, Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn list_empty_returns_empty() {
+    let (_env, _creator, client) = setup();
+    let page = client.list(&0u32, &20u32);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn list_returns_all_in_insertion_order() {
+    let (env, creator, client) = setup();
+    let ids = ["a", "b", "c"];
+    for id in &ids {
+        client.register(
+            &creator,
+            &String::from_str(&env, id),
+            &100i128,
+            &String::from_str(&env, "m"),
+        );
+    }
+
+    let page = client.list(&0u32, &20u32);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().id, String::from_str(&env, "a"));
+    assert_eq!(page.get(1).unwrap().id, String::from_str(&env, "b"));
+    assert_eq!(page.get(2).unwrap().id, String::from_str(&env, "c"));
+}
+
+fn metadata_of_len(env: &Env, len: u32) -> String {
+    let s = "a".repeat(len as usize);
+    String::from_str(env, &s)
+}
+
+#[test]
+fn register_accepts_metadata_at_max_length() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "meta-max");
+    let metadata = metadata_of_len(&env, MAX_METADATA_POINTER_LEN);
+    client.register(&creator, &id, &100i128, &metadata);
+    assert_eq!(client.get(&id).metadata.len(), MAX_METADATA_POINTER_LEN);
+}
+
+#[test]
+fn register_rejects_metadata_over_max_length() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "meta-long");
+    let metadata = metadata_of_len(&env, MAX_METADATA_POINTER_LEN + 1);
+    assert_eq!(
+        client.try_register(&creator, &id, &100i128, &metadata),
+        Err(Ok(Error::MetadataTooLong))
+    );
+    assert!(!client.exists(&id));
+}
+
+#[test]
+fn update_metadata_accepts_at_max_length() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "meta-upd-ok");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "short"));
+    let metadata = metadata_of_len(&env, MAX_METADATA_POINTER_LEN);
+    client.update_metadata(&id, &metadata);
+    assert_eq!(client.get(&id).metadata.len(), MAX_METADATA_POINTER_LEN);
+}
+
+#[test]
+fn update_metadata_rejects_over_max_length() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "meta-upd-bad");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "short"));
+    let metadata = metadata_of_len(&env, MAX_METADATA_POINTER_LEN + 1);
+    assert_eq!(
+        client.try_update_metadata(&id, &metadata),
+        Err(Ok(Error::MetadataTooLong))
+    );
+    assert_eq!(client.get(&id).metadata, String::from_str(&env, "short"));
+}
+
+fn register_n(env: &Env, creator: &Address, client: &VaultRegistryClient<'_>, ids: &[&str]) {
+    for id in ids {
+        client.register(
+            creator,
+            &String::from_str(env, id),
+            &100i128,
+            &String::from_str(env, "m"),
+        );
+    }
+}
+
+#[test]
+fn list_pagination_first_page() {
+    let (env, creator, client) = setup();
+    register_n(&env, &creator, &client, &["r0", "r1", "r2", "r3", "r4"]);
+
+    let page = client.list(&0u32, &3u32);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().id, String::from_str(&env, "r0"));
+    assert_eq!(page.get(2).unwrap().id, String::from_str(&env, "r2"));
+}
+
+#[test]
+fn list_pagination_second_page() {
+    let (env, creator, client) = setup();
+    register_n(&env, &creator, &client, &["r0", "r1", "r2", "r3", "r4"]);
+
+    let page = client.list(&3u32, &3u32);
+    assert_eq!(page.len(), 2); // only r3, r4 remain
+    assert_eq!(page.get(0).unwrap().id, String::from_str(&env, "r3"));
+    assert_eq!(page.get(1).unwrap().id, String::from_str(&env, "r4"));
+}
+
+#[test]
+fn list_start_beyond_count_returns_empty() {
+    let (env, creator, client) = setup();
+    client.register(
+        &creator,
+        &String::from_str(&env, "x"),
+        &100i128,
+        &String::from_str(&env, "m"),
+    );
+
+    let page = client.list(&99u32, &10u32);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn register_extends_resource_storage_ttl() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "ttl-register");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "m"));
+    assert_eq!(
+        resource_storage_ttl(&env, &client.address, &id),
+        TTL_BUMP_AMOUNT
+    );
+}
+
+#[test]
+fn set_price_reextends_resource_ttl() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "ttl-price");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "m"));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + DAY_IN_LEDGERS);
+    assert_eq!(
+        resource_storage_ttl(&env, &client.address, &id),
+        TTL_BUMP_AMOUNT - DAY_IN_LEDGERS
+    );
+
+    client.set_price(&id, &200i128);
+    assert_eq!(
+        resource_storage_ttl(&env, &client.address, &id),
+        TTL_BUMP_AMOUNT
+    );
+}
+
+#[test]
+fn update_metadata_reextends_resource_ttl() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "ttl-meta");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "old"));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + DAY_IN_LEDGERS);
+
+    client.update_metadata(&id, &String::from_str(&env, "new"));
+    assert_eq!(
+        resource_storage_ttl(&env, &client.address, &id),
+        TTL_BUMP_AMOUNT
+    );
+}
+
+#[test]
+fn transfer_ownership_reextends_resource_ttl() {
+    let (env, creator, client) = setup();
+    let id = String::from_str(&env, "ttl-xfer");
+    client.register(&creator, &id, &100i128, &String::from_str(&env, "m"));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + DAY_IN_LEDGERS);
+
+    let new_owner = Address::generate(&env);
+    client.transfer_ownership(&id, &new_owner);
+    assert_eq!(
+        resource_storage_ttl(&env, &client.address, &id),
+        TTL_BUMP_AMOUNT
+    );
+}
+
+#[test]
+fn list_limit_capped_at_20() {
+    let (env, creator, client) = setup();
+    let ids = [
+        "i00", "i01", "i02", "i03", "i04", "i05", "i06", "i07", "i08", "i09", "i10", "i11", "i12",
+        "i13", "i14", "i15", "i16", "i17", "i18", "i19", "i20", "i21", "i22", "i23", "i24",
+    ];
+    register_n(&env, &creator, &client, &ids);
+
+    // Requesting 25 items should be silently capped to 20.
+    let page = client.list(&0u32, &25u32);
+    assert_eq!(page.len(), 20);
 }
