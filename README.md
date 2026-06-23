@@ -27,7 +27,7 @@ MindVault is built entirely on Stellar's infrastructure. Every payment that flow
 
 **USDC on Soroban** — All payments use the Stellar testnet USDC token contract (`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`). This is a Stellar Asset Contract (SAC) that wraps the classic USDC issuer. Balances are interchangeable between classic and Soroban operations.
 
-**Wallet Connection** — The web app uses `@creit.tech/stellar-wallets-kit` to connect browser wallets (Freighter, xBull, Albedo, and others). When a user pays for a resource, the wallet kit bridges to x402's `ClientStellarSigner` interface to sign Soroban auth entries.
+**Wallet Connection** — The web app uses `@stellar/freighter-api` to connect [Freighter](https://www.freighter.app/) browser wallets. When a user pays for a resource, Freighter signs the Soroban transaction entry directly via the Freighter extension API.
 
 **Sponsored Agent Accounts** — The MCP server uses the [stellar-sponsored-agent-account](https://github.com/oceans404/stellar-sponsored-agent-account) service to create wallets for AI agents. The service sponsors the ~1.5 XLM reserve needed to create an account and establish a USDC trustline, so an agent can get a wallet with zero upfront cost.
 
@@ -49,7 +49,7 @@ The verification agent has processed 7 verifications, approved 2, rejected 5, an
 
 **AI Agents** can browse the catalog, pay for resources, and even publish their own — all programmatically through the API or MCP server. No accounts, no OAuth. An HTTP request and a Stellar payment is all they need.
 
-**Humans** connect a browser wallet (Freighter, xBull, etc.), browse the vault, and pay to access resources with one click.
+**Humans** connect a [Freighter](https://www.freighter.app/) browser wallet, browse the vault, and pay to access resources with one click.
 
 All three interact with the same URLs, the same 402 responses, and the same x402 payment flow.
 
@@ -78,10 +78,10 @@ Available tools:
 cd mcp && pnpm install && pnpm build
 
 # Claude Code
-claude mcp add mindvault node /path/to/mindVault/mcp/dist/index.js
+claude mcp add mindvault node /path/to/mindvault/mcp/dist/index.js
 
 # Codex
-codex mcp add mindvault -- node /path/to/mindVault/mcp/dist/index.js
+codex mcp add mindvault -- node /path/to/mindvault/mcp/dist/index.js
 ```
 
 An agent can set up a wallet, register as a publisher, publish a resource (paying for verification), and then another agent can discover and buy that resource. The full agent-to-agent economy runs through x402.
@@ -91,7 +91,7 @@ For a copy-pasteable, end-to-end agent session — wallet setup → register →
 ## Project Structure
 
 ```
-mindVault/
+mindvault/
   server/     Express backend, x402 middleware, Supabase, verification agent
   web/        React frontend, Stellar wallet connection, Tailwind
   mcp/        MCP server for AI agent access
@@ -109,7 +109,7 @@ make install          # or: pnpm install
 
 # 2. Configure environment
 cp server/.env.example server/.env
-# Fill in Supabase, Stellar contract IDs, and OpenRouter credentials.
+# Fill in Supabase, Stellar contract IDs, and OpenRouter credentials (see the full reference table at [docs/server-env.md](docs/server-env.md)).
 
 # 3. One-time setup (DB migrations + wallet generation)
 make setup
@@ -203,14 +203,14 @@ The `PAYMENT-REQUIRED` header contains the price, destination wallet, network, a
 | Storage | Supabase Storage |
 | AI | OpenRouter (model-flexible, defaults to Claude) |
 | Frontend | React, Vite, Tailwind CSS |
-| Wallets | @creit.tech/stellar-wallets-kit |
+| Wallets | @stellar/freighter-api ([Freighter](https://www.freighter.app/)) |
 | Agent Access | MCP server with sponsored account provisioning |
 
 ## Links
 - x402 protocol: [x402.org](https://www.x402.org/)
 - x402 on Stellar: [developers.stellar.org](https://developers.stellar.org/docs/build/agentic-payments/x402)
 - Sponsored accounts: [stellar-sponsored-agent-account](https://github.com/oceans404/stellar-sponsored-agent-account)
-- Stellar Wallets Kit: [stellarwalletskit.dev](https://stellarwalletskit.dev/)
+- Freighter wallet: [freighter.app](https://www.freighter.app/)
 - Circle testnet faucet: [faucet.circle.com](https://faucet.circle.com)
 
 ## License
