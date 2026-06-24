@@ -130,14 +130,25 @@ async function queryCatalog(filters?: CatalogListFilters) {
 }
 
 export async function listCatalog(
-  filters?: CatalogListFilters,
+  searchTerm?: string,
 ): Promise<Awaited<ReturnType<typeof queryCatalog>>> {
-  const cacheKey = catalogCacheKey(filters);
-  const cached = readCache.get(cacheKey);
-  if (cached !== undefined) return cached as Awaited<ReturnType<typeof queryCatalog>>;
+  let rows: Awaited<ReturnType<typeof queryCatalog>>;
 
-  const rows = await queryCatalog(filters);
-  readCache.set(cacheKey, rows);
+  const cached = readCache.get(CATALOG_KEY);
+  if (cached !== undefined) {
+    rows = cached as Awaited<ReturnType<typeof queryCatalog>>;
+  } else {
+    rows = await queryCatalog();
+    readCache.set(CATALOG_KEY, rows);
+  }
+
+  if (searchTerm) {
+    const q = searchTerm.toLowerCase();
+    return rows.filter(
+      (r) => r.title?.toLowerCase().includes(q) || r.description?.toLowerCase().includes(q),
+    );
+  }
+
   return rows;
 }
 

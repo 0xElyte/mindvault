@@ -147,14 +147,8 @@ router.post(
 
 // GET /resources — browse catalog (public)
 router.get("/resources", async (req, res) => {
-  const parsed = catalogQuerySchema.safeParse(req.query);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.format() });
-    return;
-  }
-
-  const { verificationStatus } = parsed.data;
-  const catalog = await listCatalog(verificationStatus ? { verificationStatus } : undefined);
+  const search = typeof req.query.search === "string" ? req.query.search : undefined;
+  const catalog = await listCatalog(search);
   res.json(
     catalog.map((r) => ({
       ...r,
