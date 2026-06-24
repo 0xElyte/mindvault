@@ -10,6 +10,7 @@ import {
   setPriceSchema,
   prepareOwnershipSchema,
   transferOwnershipSchema,
+  catalogQuerySchema,
 } from "../schemas/requests.js";
 import { dynamicPaywall } from "../middleware/dynamicPaywall.js";
 import {
@@ -145,8 +146,15 @@ router.post(
 );
 
 // GET /resources — browse catalog (public)
-router.get("/resources", async (_req, res) => {
-  const catalog = await listCatalog();
+router.get("/resources", async (req, res) => {
+  const parsed = catalogQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.format() });
+    return;
+  }
+
+  const { verificationStatus } = parsed.data;
+  const catalog = await listCatalog(verificationStatus ? { verificationStatus } : undefined);
   res.json(
     catalog.map((r) => ({
       ...r,
