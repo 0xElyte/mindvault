@@ -114,6 +114,47 @@ function formatResource(r: any): string {
   return `[${r.id}] ${r.title} — $${r.price} USDC\n  ${r.description ?? ""}\n  ${r.accessUrl}`;
 }
 
+interface SearchFilters {
+  query: string;
+  minPrice?: string;
+  maxPrice?: string;
+  verificationStatus?: "pending" | "verified" | "rejected" | "skipped";
+  resourceType?: "file" | "link";
+}
+
+function normalizeSearchFilters(args: any): SearchFilters | null {
+  const query = typeof args?.query === "string" ? args.query.trim() : "";
+  if (!query) return null;
+
+  const minPrice = typeof args?.minPrice === "string" ? args.minPrice.trim() : "";
+  const maxPrice = typeof args?.maxPrice === "string" ? args.maxPrice.trim() : "";
+  const verificationStatus =
+    args?.verificationStatus === "pending" ||
+    args?.verificationStatus === "verified" ||
+    args?.verificationStatus === "rejected" ||
+    args?.verificationStatus === "skipped"
+      ? args.verificationStatus
+      : undefined;
+  const resourceType = args?.resourceType === "file" || args?.resourceType === "link" ? args.resourceType : undefined;
+
+  return {
+    query,
+    minPrice: minPrice || undefined,
+    maxPrice: maxPrice || undefined,
+    verificationStatus,
+    resourceType,
+  };
+}
+
+function describeFilters(filters: SearchFilters): string {
+  const parts = [`query "${filters.query}"`];
+  if (filters.minPrice) parts.push(`min $${filters.minPrice}`);
+  if (filters.maxPrice) parts.push(`max $${filters.maxPrice}`);
+  if (filters.verificationStatus) parts.push(`status ${filters.verificationStatus}`);
+  if (filters.resourceType) parts.push(`type ${filters.resourceType}`);
+  return parts.join(", ");
+}
+
 /**
  * Compares the agent wallet's USDC balance against an amount it is about to
  * spend. Returns an actionable insufficient-funds message (balance, amount
@@ -201,11 +242,8 @@ export async function search(query: string): Promise<string> {
   const res = await jsonFetch(`${BASE_URL}/resources`);
   if (!res.ok) throw new Error(`Search failed: ${JSON.stringify(res.data)}`);
   const items: any[] = res.data;
-  const matches = items.filter((r) =>
-    `${r.title ?? ""} ${r.description ?? ""}`.toLowerCase().includes(q),
-  );
-  if (matches.length === 0) return `No resources match "${query}".`;
-  return matches.map(formatResource).join("\n\n");
+  if (items.length === 0) return `No resources match ${describeFilters(filters)}.`;
+  return items.map(formatResource).join("\n\n");
 }
 
 export async function preview(resourceId: string): Promise<string> {
@@ -408,11 +446,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "mindvault_search",
       description:
-        "Search the MindVault catalog by keyword and return matching resources (title or description match). Use this to find resources without browsing the full list.",
+        "Search the MindVault catalog by keyword and optional filters for price, resource type, and verification status. Uses server-side filtering and returns compact resource summaries.",
       inputSchema: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Keyword(s) to match against resources." },
+          query: { type: "string", description: "Keyword(s) to match against resource title or description." },
+          minPrice: { type: "string", description: "Minimum USDC price to include." },
+          maxPrice: { type: "string", description: "Maximum USDC price to include." },
+          verificationStatus: {
+            type: "string",
+            enum: ["pending", "verified", "rejected", "skipped"],
+            description: "Filter by verification status.",
+          },
+          resourceType: {
+            type: "string",
+            enum: ["file", "link"],
+            description: "Filter by resource type.",
+          },
         },
         required: ["query"],
       },
@@ -502,7 +552,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await browse();
         break;
       case "mindvault_search":
-        result = await search(args.query as string);
+        result = await search(args as SearchFilters);
         break;
       case "mindvault_preview":
         result = await preview(args.resourceId as string);
